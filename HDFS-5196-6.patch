@@ -1,0 +1,514 @@
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshotInfo.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshotInfo.java
+index db734a1..0aa96df 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshotInfo.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshotInfo.java
+@@ -17,9 +17,12 @@
+  */
+ package org.apache.hadoop.hdfs.protocol;
+ 
++import java.util.Date;
++
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.classification.InterfaceStability;
+ import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.FsPermissionProto;
++import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
+ 
+ /**
+  * SnapshotInfo maintains information for a snapshot
+@@ -79,4 +82,28 @@ public String toString() {
+         + "; group=" + group
+         + "}";
+   }
++  
++  public static class Bean {
++    private final String snapshotID;
++    private final String snapshotDirectory;
++    private final long modificationTime;
++    
++    public Bean(Snapshot s) {
++      this.snapshotID = s.getRoot().getLocalName();
++      this.snapshotDirectory = s.getRoot().getFullPathName();
++      this.modificationTime = s.getRoot().getModificationTime();
++    }
++    
++    public String getSnapshotID() {
++      return snapshotID;
++    }
++    
++    public String getSnapshotDirectory() {
++      return snapshotDirectory;
++    }
++    
++    public long getModificationTime() {
++      return modificationTime;
++    }
++  }
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
+index ef0f894..cf307a1 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/protocol/SnapshottableDirectoryStatus.java
+@@ -166,4 +166,52 @@ public static void print(SnapshottableDirectoryStatus[] stats,
+   private static int maxLength(int n, Object value) {
+     return Math.max(n, String.valueOf(value).length());
+   }
++  
++  public static class Bean {
++    private final String path;
++    private final int snapshotNumber;
++    private final int snapshotQuota;
++    private final long modificationTime;
++    private final short permission;
++    private final String owner;
++    private final String group;
++    
++    public Bean(SnapshottableDirectoryStatus s) {
++      this.path = s.getFullPath().toString();
++      this.snapshotNumber = s.getSnapshotNumber();
++      this.snapshotQuota = s.getSnapshotQuota();
++      this.modificationTime = s.getDirStatus().getModificationTime();
++      this.permission = s.getDirStatus().getPermission().toShort();
++      this.owner = s.getDirStatus().getOwner();
++      this.group = s.getDirStatus().getGroup();
++    }
++    
++    public String getPath() {
++      return path;
++    }
++    
++    public int getSnapshotNumber() {
++      return snapshotNumber;
++    }
++    
++    public int getSnapshotQuota() {
++      return snapshotQuota;
++    }
++    
++    public long getModificationTime() {
++      return modificationTime;
++    }
++    
++    public short getPermission() {
++      return permission;
++    }
++    
++    public String getOwner() {
++      return owner;
++    }
++    
++    public String getGroup() {
++      return group;
++    }
++  }
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+index c26f964..2728459 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+@@ -178,6 +178,7 @@
+ import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
+ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
+ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
++import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
+ import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+ import org.apache.hadoop.hdfs.protocol.datatransfer.ReplaceDatanodeOnFailure;
+ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+@@ -4511,6 +4512,53 @@ public String getSnapshotStats() {
+     return JSON.toString(info);
+   }
+ 
++  public SnapshottableDirectoryStatus.Bean[] getSnapshottableDirs() {
++    List<SnapshottableDirectoryStatus.Bean> info =
++        new ArrayList<SnapshottableDirectoryStatus.Bean>();
++    SnapshottableDirectoryStatus[] stats = null;
++    try {
++      stats = getSnapshottableDirListing();
++    } catch (IOException e) {
++      return info.toArray(new SnapshottableDirectoryStatus.Bean[0]);
++    }
++    if (stats == null) {
++      return info.toArray(new SnapshottableDirectoryStatus.Bean[0]);
++    }
++    for (SnapshottableDirectoryStatus s : stats) {
++      SnapshottableDirectoryStatus.Bean bean =
++          new SnapshottableDirectoryStatus.Bean(s);
++      info.add(bean);
++    }
++    return info.toArray(new SnapshottableDirectoryStatus.Bean[0]);
++  }
++  
++  public SnapshotInfo.Bean[] getSnapshottedDirs() {
++    List<SnapshotInfo.Bean> info = new ArrayList<SnapshotInfo.Bean>();
++    SnapshotManager manager = getSnapshotManager();
++    SnapshottableDirectoryStatus[] stats = null;
++    try {
++      stats = getSnapshottableDirListing();
++    } catch (IOException e) {
++      return info.toArray(new SnapshotInfo.Bean[0]);
++    }
++    if (stats == null) {
++      return info.toArray(new SnapshotInfo.Bean[0]);
++    }
++    for (SnapshottableDirectoryStatus s : stats) {
++      INodeDirectorySnapshottable dir = null;
++      try {
++        dir = manager.getSnapshottableRoot(s.getFullPath().toString());
++      } catch (IOException e) {
++        continue;
++      }
++      for (Snapshot shot : dir.getSnapshotList()) {
++        SnapshotInfo.Bean bean = new SnapshotInfo.Bean(shot);
++        info.add(bean);
++      }
++    }
++    return info.toArray(new SnapshotInfo.Bean[0]);
++  }
++  
+   int getNumberOfDatanodes(DatanodeReportType type) {
+     readLock();
+     try {
+@@ -5647,6 +5695,9 @@ void shutdown() {
+     if (blockManager != null) {
+       blockManager.shutdown();
+     }
++    if (snapshotManager != null) {
++      snapshotManager.shutdown();
++    }
+   }
+   
+ 
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeMXBean.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeMXBean.java
+index c9b4d55..014f125 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeMXBean.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/NameNodeMXBean.java
+@@ -22,6 +22,8 @@
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.classification.InterfaceStability;
+ import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
++import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
++import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+ 
+ /**
+  * This is the JMX management interface for namenode information
+@@ -255,5 +257,4 @@
+    * @return the number of live datanodes for each distinct versions
+    */
+   public Map<String, Integer> getDistinctVersions();
+-  
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotManager.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotManager.java
+index ac1a982..a8e9f85 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotManager.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotManager.java
+@@ -26,8 +26,11 @@
+ import java.util.Map;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
++import javax.management.ObjectName;
++
+ import org.apache.hadoop.hdfs.DFSUtil;
+ import org.apache.hadoop.hdfs.protocol.SnapshotException;
++import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
+ import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+ import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
+ import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
+@@ -37,6 +40,7 @@
+ import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
+ import org.apache.hadoop.hdfs.server.namenode.INodesInPath;
+ import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectorySnapshottable.SnapshotDiffInfo;
++import org.apache.hadoop.metrics2.util.MBeans;
+ 
+ /**
+  * Manage snapshottable directories and their snapshots.
+@@ -50,7 +54,7 @@
+  * 2. Lock the {@link FSDirectory} lock for the {@link SnapshotManager} methods
+  * if necessary.
+  */
+-public class SnapshotManager implements SnapshotStats {
++public class SnapshotManager implements SnapshotStatsMXBean {
+   private boolean allowNestedSnapshots = false;
+   private final FSDirectory fsdir;
+   private static final int SNAPSHOT_ID_BIT_WIDTH = 24;
+@@ -65,6 +69,7 @@
+ 
+   public SnapshotManager(final FSDirectory fsdir) {
+     this.fsdir = fsdir;
++    registerMXBean();
+   }
+ 
+   /** Used in tests only */
+@@ -259,12 +264,12 @@ public void renameSnapshot(final String path, final String oldSnapshotName,
+     srcRoot.renameSnapshot(path, oldSnapshotName, newSnapshotName);
+   }
+   
+-  @Override
++  @Override // SnapshotStat
+   public int getNumSnapshottableDirs() {
+     return snapshottables.size();
+   }
+ 
+-  @Override
++  @Override // SnapshotStat
+   public int getNumSnapshots() {
+     return numSnapshots.get();
+   }
+@@ -372,4 +377,54 @@ public void clearSnapshottableDirs() {
+    public int getMaxSnapshotID() {
+     return ((1 << SNAPSHOT_ID_BIT_WIDTH) - 1);
+   }
++  
++  private ObjectName mxbeanName;
++  
++  private void registerMXBean() {
++    mxbeanName = MBeans.register("NameNode", "SnapshotInfo", this);
++  }
++  
++  public void shutdown() {
++    MBeans.unregister(mxbeanName);
++    mxbeanName = null;
++  }
++  
++  @Override // SnapshotMXBean
++  public SnapshottableDirectoryStatus.Bean[] getSnapshottableDirectories() {
++    List<SnapshottableDirectoryStatus.Bean> info =
++        new ArrayList<SnapshottableDirectoryStatus.Bean>();
++    SnapshottableDirectoryStatus[] stats = getSnapshottableDirListing(null);
++    if (stats == null) {
++      return null;
++    }
++    for (SnapshottableDirectoryStatus s : stats) {
++      SnapshottableDirectoryStatus.Bean bean =
++          new SnapshottableDirectoryStatus.Bean(s);
++      info.add(bean);
++    }
++    return info.toArray(new SnapshottableDirectoryStatus.Bean[0]);
++  }
++  
++  @Override // SnapshotMXBean
++  public SnapshotInfo.Bean[] getSnapshots() {
++    List<SnapshotInfo.Bean> info = new ArrayList<SnapshotInfo.Bean>();
++    SnapshottableDirectoryStatus[] stats = getSnapshottableDirListing(null);
++    if (stats == null) {
++      return null;
++    }
++    for (SnapshottableDirectoryStatus s : stats) {
++      INodeDirectorySnapshottable dir = null;
++      try {
++        dir = getSnapshottableRoot(s.getFullPath().toString());
++      } catch (IOException e) {
++        continue;
++      }
++      for (Snapshot shot : dir.getSnapshotList()) {
++        SnapshotInfo.Bean bean = new SnapshotInfo.Bean(shot);
++        info.add(bean);
++      }
++    }
++    return info.toArray(new SnapshotInfo.Bean[0]);
++  }
++
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStats.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStats.java
+deleted file mode 100644
+index 29b40e9..0000000
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStats.java
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.hadoop.hdfs.server.namenode.snapshot;
+-
+-/**
+- * This is an interface used to retrieve statistic information related to
+- * snapshots
+- */
+-public interface SnapshotStats {
+-
+-  /**
+-   * @return The number of snapshottale directories in the system 
+-   */
+-  public int getNumSnapshottableDirs();
+-  
+-  /**
+-   * @return The number of directories that have been snapshotted
+-   */
+-  public int getNumSnapshots();
+-  
+-}
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStatsMXBean.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStatsMXBean.java
+new file mode 100644
+index 0000000..45814bb
+--- /dev/null
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/namenode/snapshot/SnapshotStatsMXBean.java
+@@ -0,0 +1,52 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hdfs.server.namenode.snapshot;
++
++import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
++import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
++
++/**
++ * This is an interface used to retrieve statistic information related to
++ * snapshots
++ */
++public interface SnapshotStatsMXBean {
++
++  /**
++   * @return The number of snapshottale directories in the system 
++   */
++  public int getNumSnapshottableDirs();
++  
++  /**
++   * @return The number of directories that have been snapshotted
++   */
++  public int getNumSnapshots();
++  
++  /**
++   * Return the list of snapshottable directories
++   * 
++   * @return the list of snapshottable directories
++   */
++  public SnapshottableDirectoryStatus.Bean[] getSnapshottableDirectories();
++  
++  /**
++   * Return the list of snapshots
++   * 
++   * @return the list of snapshots
++   */
++  public SnapshotInfo.Bean[] getSnapshots();
++}
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.html hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.html
+index eb7d438..6bac9bb 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.html
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.html
+@@ -189,8 +189,60 @@
+ 
+ <script type="text/x-dust-template" id="tmpl-snapshot">
+ <div class="page-header"><h1>Snapshot Summary</h1></div>
+-<p><b>Snapshottable directories</b>: {SnapshottableDirectories}</p>
+-<p><b>Snapshotted directories</b>: {Snapshots}</p>
++{#snapshotinfo}
++<div class="page-header"><h1><small>Snapshottable directories: {SnapshottableDirectories}</small></div>
++{/snapshotinfo}
++
++<small>
++<table class="table">
++  <thead>
++    <tr>
++      <th>Path</th>
++      <th>Snapshot Number</th>
++      <th>Snapshot Quota</th>
++      <th>Modification Time</th>
++      <th>Permission</th>
++      <th>Owner</th>
++      <th>Group</th>
++    </tr>
++  </thead>
++  {#snapshotinfo.SnapshottableDirs}
++  <tr>
++    <td>{path}</td>
++    <td>{snapshotNumber}</td>
++    <td>{snapshotQuota}</td>
++    <td>{modificationTime}</td>
++    <td>{permission}</td>
++    <td>{owner}</td>
++    <td>{group}</td>
++  </tr>
++  {/snapshotinfo.SnapshottableDirs}
++</table>
++</small>
++
++{#snapshotinfo}
++<div class="page-header"><h1><small>Snapshotted directories: {Snapshots}</small></div>
++{/snapshotinfo}
++
++<small>
++<table class="table">
++  <thead>
++    <tr>
++      <th>Snapshot ID</th>
++      <th>Snapshot Directory</th>
++      <th>Modification Time</th>
++    </tr>
++  </thead>
++  {#snapshotinfo.SnapshottedDirs}
++  <tr>
++    <td>{snapshotID}</td>
++    <td>{snapshotDirectory}</td>
++    <td>{modificationTime}</td>
++  </tr>
++  {/snapshotinfo.SnapshottedDirs}
++</table>
++</small>
++
+ </script>
+ 
+ <script type="text/x-dust-template" id="tmpl-datanode">
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.js hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.js
+index 3165d16..9e61ae3 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.js
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/webapps/hdfs/dfshealth.js
+@@ -175,10 +175,9 @@
+ 
+   function load_snapshot_info() {
+     $.get(
+-      '/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState',
++      '/jmx?qry=Hadoop:service=NameNode,name=SnapshotInfo',
+       guard_with_startup_progress(function (resp) {
+-        var data = JSON.parse(resp.beans[0].SnapshotStats);
+-        dust.render('snapshot-info', data, function(err, out) {
++        dust.render('snapshot-info', resp.beans[0], function(err, out) {
+           $('#tab-snapshot').html(out);
+           $('#ui-tabs a[href="#tab-snapshot"]').tab('show');
+         });
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestNameNodeMXBean.java hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestNameNodeMXBean.java
+index d459d30..568a8aa 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestNameNodeMXBean.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/namenode/TestNameNodeMXBean.java
+@@ -160,6 +160,16 @@ public void testNameNodeMXBeanInfo() throws Exception {
+       assertEquals(2, statusMap.get("active").size());
+       assertEquals(0, statusMap.get("failed").size());
+       
++      // get attribute "SnapshottableDirs"
++      Object[] snapshottableDirs = (Object[])
++          mbs.getAttribute(mxbeanName, "SnapshottableDirs");
++      assertEquals(snapshottableDirs.length, fsn.getSnapshottableDirs().length);
++      
++      // get attribute "SnapshottedDirs"
++      Object[] snapshottedDirs = (Object[])
++          mbs.getAttribute(mxbeanName, "SnapshottedDirs");
++      assertEquals(snapshottedDirs.length, fsn.getSnapshottedDirs().length);
++      
+       // This will cause the first dir to fail.
+       File failedNameDir = new File(nameDirUris.iterator().next());
+       assertEquals(0, FileUtil.chmod(
