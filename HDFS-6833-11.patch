@@ -1,0 +1,391 @@
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DataNode.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+index 13c32d5..1abf4e0 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DataNode.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DataNode.java
+@@ -3153,4 +3153,8 @@ public void removeSpanReceiver(long id) throws IOException {
+     checkSuperuserPrivilege();
+     spanReceiverHost.removeSpanReceiver(id);
+   }
++
++  public boolean isDirectoryScanning() {
++    return directoryScanner.isDirectoryScanning();
++  }
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DirectoryScanner.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DirectoryScanner.java
+index 71f976b..7050621 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DirectoryScanner.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/DirectoryScanner.java
+@@ -21,10 +21,12 @@
+ import java.io.IOException;
+ import java.util.Arrays;
+ import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Map.Entry;
++import java.util.Set;
+ import java.util.concurrent.Callable;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+@@ -63,6 +65,7 @@
+   private final long scanPeriodMsecs;
+   private volatile boolean shouldRun = false;
+   private boolean retainDiffs = false;
++  private boolean scanning = false;
+ 
+   final ScanInfoPerBlockPool diffs = new ScanInfoPerBlockPool();
+   final Map<String, Stats> stats = new HashMap<String, Stats>();
+@@ -84,6 +87,7 @@ void setRetainDiffs(boolean b) {
+     long missingMemoryBlocks = 0;
+     long mismatchBlocks = 0;
+     long duplicateBlocks = 0;
++    long deletingBlocks = 0;
+     
+     public Stats(String bpid) {
+       this.bpid = bpid;
+@@ -95,7 +99,8 @@ public String toString() {
+       + " Total blocks: " + totalBlocks + ", missing metadata files:"
+       + missingMetaFile + ", missing block files:" + missingBlockFile
+       + ", missing blocks in memory:" + missingMemoryBlocks
+-      + ", mismatched blocks:" + mismatchBlocks;
++      + ", mismatched blocks:" + mismatchBlocks
++      + ", to-be-deleted blocks: " + deletingBlocks;
+     }
+   }
+   
+@@ -419,6 +424,7 @@ void reconcile() throws IOException {
+    * Scan only the "finalized blocks" lists of both disk and memory.
+    */
+   void scan() {
++    scanning = true;
+     clear();
+     Map<String, ScanInfo[]> diskReport = getDiskReport();
+ 
+@@ -437,17 +443,24 @@ void scan() {
+         List<FinalizedReplica> bl = dataset.getFinalizedBlocks(bpid);
+         FinalizedReplica[] memReport = bl.toArray(new FinalizedReplica[bl.size()]);
+         Arrays.sort(memReport); // Sort based on blockId
+-  
++        
++        Set<Long> deletingBlockIds = new HashSet<Long>();
++        
+         int d = 0; // index for blockpoolReport
+         int m = 0; // index for memReprot
+         while (m < memReport.length && d < blockpoolReport.length) {
+-          FinalizedReplica memBlock = memReport[Math.min(m, memReport.length - 1)];
+-          ScanInfo info = blockpoolReport[Math.min(
+-              d, blockpoolReport.length - 1)];
++          FinalizedReplica memBlock = memReport[m];
++          ScanInfo info = blockpoolReport[d];
+           if (info.getBlockId() < memBlock.getBlockId()) {
+-            // Block is missing in memory
+-            statsRecord.missingMemoryBlocks++;
+-            addDifference(diffRecord, statsRecord, info);
++            if (!dataset.isDeletingBlock(bpid, info.getBlockId())) {
++              // Block is missing in memory
++              statsRecord.missingMemoryBlocks++;
++              addDifference(diffRecord, statsRecord, info);
++            } else {
++              LOG.info("Block file " + blockpoolReport[d].getBlockFile() + " is to be deleted");
++              statsRecord.deletingBlocks++;
++              deletingBlockIds.add(info.getBlockId());
++            }
+             d++;
+             continue;
+           }
+@@ -493,12 +506,20 @@ void scan() {
+                         current.getBlockId(), current.getVolume());
+         }
+         while (d < blockpoolReport.length) {
+-          statsRecord.missingMemoryBlocks++;
+-          addDifference(diffRecord, statsRecord, blockpoolReport[d++]);
++          if (!dataset.isDeletingBlock(bpid, blockpoolReport[d++].getBlockId())) {
++            statsRecord.missingMemoryBlocks++;
++            addDifference(diffRecord, statsRecord, blockpoolReport[d]);
++          } else {
++            LOG.info("Block file " + blockpoolReport[d].getBlockFile() + " is to be deleted");
++            statsRecord.deletingBlocks++;
++            deletingBlockIds.add(blockpoolReport[d].getBlockId());
++          }
++          d++;
+         }
+         LOG.info(statsRecord.toString());
+       } //end for
+     } //end synchronized
++    scanning = false;
+   }
+ 
+   /**
+@@ -582,6 +603,10 @@ private static boolean isBlockMetaFile(String blockId, String metaFile) {
+         && metaFile.endsWith(Block.METADATA_EXTENSION);
+   }
+ 
++  public boolean isDirectoryScanning() {
++    return scanning;
++  }
++
+   private static class ReportCompiler 
+   implements Callable<ScanInfoPerBlockPool> {
+     private final FsVolumeSpi volume;
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/FsDatasetSpi.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/FsDatasetSpi.java
+index 462ad31..6d807ae 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/FsDatasetSpi.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/FsDatasetSpi.java
+@@ -27,6 +27,7 @@
+ import java.util.Collection;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.hadoop.classification.InterfaceAudience;
+ import org.apache.hadoop.conf.Configuration;
+@@ -515,4 +516,19 @@ public void onCompleteLazyPersist(String bpId, long blockId,
+      */
+     public ReplicaInfo moveBlockAcrossStorage(final ExtendedBlock block,
+         StorageType targetStorageType) throws IOException;
++
++  /**
++   * Confirm whether the block is deleting
++   */
++  public boolean isDeletingBlock(String bpid, long blockId);
++
++  /**
++   * Remove the deleting blocks
++   */
++  public void removeDeletedBlocks(String bpid, Set<Long> blockIds);
++
++  /**
++   * return the number of removing block
++   */
++  public int getNumDeletingBlocks(String bpid);
+ }
+\ No newline at end of file
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetAsyncDiskService.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetAsyncDiskService.java
+index bee7bf7..c0174d2 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetAsyncDiskService.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetAsyncDiskService.java
+@@ -21,7 +21,9 @@
+ import java.io.File;
+ import java.io.FileDescriptor;
+ import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.ThreadPoolExecutor;
+@@ -64,6 +66,10 @@
+   private final ThreadGroup threadGroup;
+   private Map<File, ThreadPoolExecutor> executors
+       = new HashMap<File, ThreadPoolExecutor>();
++  private Map<String, Set<Long>> deletedBlockIds 
++      = new HashMap<String, Set<Long>>();
++  private static final int MAX_DELETED_BLOCKS = 64;
++  private int numDeletedBlocks = 0;
+   
+   /**
+    * Create a AsyncDiskServices with a set of volumes (specified by their
+@@ -281,6 +287,22 @@ public void run() {
+         LOG.info("Deleted " + block.getBlockPoolId() + " "
+             + block.getLocalBlock() + " file " + blockFile);
+       }
++      if (!datanode.isDirectoryScanning()) {
++        if (deletedBlockIds.containsKey(block.getBlockPoolId())) {
++          Set<Long> blockIds = new HashSet<Long>();
++          deletedBlockIds.put(block.getBlockPoolId(), blockIds);
++        }
++        deletedBlockIds.get(block.getBlockPoolId()).add(block.getBlockId());
++        numDeletedBlocks++;
++        if (numDeletedBlocks == MAX_DELETED_BLOCKS) {
++          for (String bpid : deletedBlockIds.keySet()) {
++            datanode.getFSDataset().removeDeletedBlocks(
++                bpid, deletedBlockIds.get(bpid));
++            deletedBlockIds.get(bpid).clear();
++          }
++          numDeletedBlocks = 0;
++        }
++      }
+     }
+   }
+ }
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetImpl.java hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetImpl.java
+index 2c6f409..507c7a3 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetImpl.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/FsDatasetImpl.java
+@@ -223,6 +223,7 @@ public LengthInputStream getMetaDataInputStream(ExtendedBlock b)
+   private volatile boolean fsRunning;
+ 
+   final ReplicaMap volumeMap;
++  final ReplicaMap deletingBlock;
+   final RamDiskReplicaTracker ramDiskReplicaTracker;
+   final RamDiskAsyncLazyPersistService asyncLazyPersistService;
+ 
+@@ -268,6 +269,7 @@ public LengthInputStream getMetaDataInputStream(ExtendedBlock b)
+ 
+     storageMap = new ConcurrentHashMap<String, DatanodeStorage>();
+     volumeMap = new ReplicaMap(this);
++    deletingBlock = new ReplicaMap(this);
+     ramDiskReplicaTracker = RamDiskReplicaTracker.getInstance(conf, this);
+ 
+     @SuppressWarnings("unchecked")
+@@ -1615,7 +1617,8 @@ public void invalidate(String bpid, Block invalidBlks[]) throws IOException {
+               +  ". Parent not found for file " + f);
+           continue;
+         }
+-        volumeMap.remove(bpid, invalidBlks[i]);
++        ReplicaInfo removing = volumeMap.remove(bpid, invalidBlks[i]);
++        deletingBlock.add(bpid, removing);
+       }
+ 
+       if (v.isTransientStorage()) {
+@@ -2731,5 +2734,32 @@ public void stop() {
+       shouldRun = false;
+     }
+   }
++
++  @Override
++  public boolean isDeletingBlock(String bpid, long blockId) {
++    return deletingBlock.get(bpid, blockId) != null;
++  }
++
++  @Override
++  public void removeDeletedBlocks(String bpid, Set<Long> blockIds) {
++    synchronized (deletingBlock) {
++      Iterator<ReplicaInfo> i = deletingBlock.replicas(bpid).iterator();
++      while (i.hasNext()) {
++        ReplicaInfo r = i.next();
++        if (blockIds.contains(r.getBlockId())) {
++          i.remove();
++        }
++      }
++    }
++  }
++
++  @Override
++  public int getNumDeletingBlocks(String bpid) {
++    if (deletingBlock.replicas(bpid) == null) {
++      return 0;
++    } else {
++      return deletingBlock.replicas(bpid).size();
++    }
++  }
+ }
+ 
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
+index e03b756..d58e660 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/SimulatedFSDataset.java
+@@ -29,6 +29,7 @@
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import javax.management.NotCompliantMBeanException;
+ import javax.management.ObjectName;
+@@ -1267,5 +1268,20 @@ public ReplicaInfo moveBlockAcrossStorage(ExtendedBlock block,
+     // TODO Auto-generated method stub
+     return null;
+   }
++
++  @Override
++  public boolean isDeletingBlock(String bpid, long blockId) {
++    throw new UnsupportedOperationException();
++  }
++
++  @Override
++  public void removeDeletedBlocks(String bpid, Set<Long> blockIds) {
++    throw new UnsupportedOperationException();
++  }
++
++  @Override
++  public int getNumDeletingBlocks(String bpid) {
++    throw new UnsupportedOperationException();
++  }
+ }
+ 
+diff --git hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/TestFsDatasetImpl.java hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/TestFsDatasetImpl.java
+index 956ab78..b688cfa 100644
+--- hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/TestFsDatasetImpl.java
++++ hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/impl/TestFsDatasetImpl.java
+@@ -18,9 +18,12 @@
+ package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
+ 
+ import com.google.common.collect.Lists;
++
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FileSystemTestHelper;
+ import org.apache.hadoop.hdfs.DFSConfigKeys;
++import org.apache.hadoop.hdfs.HdfsConfiguration;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
+ import org.apache.hadoop.hdfs.StorageType;
+ import org.apache.hadoop.hdfs.protocol.Block;
+ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+@@ -30,7 +33,10 @@
+ import org.apache.hadoop.hdfs.server.datanode.DNConf;
+ import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
+ import org.apache.hadoop.hdfs.server.datanode.DataNode;
++import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+ import org.apache.hadoop.hdfs.server.datanode.DataStorage;
++import org.apache.hadoop.hdfs.server.datanode.FinalizedReplica;
++import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
+ import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
+ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+ import org.apache.hadoop.test.GenericTestUtils;
+@@ -47,6 +53,7 @@
+ import java.util.Set;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ import static org.mockito.Matchers.any;
+ import static org.mockito.Matchers.anyListOf;
+@@ -72,6 +79,8 @@
+   private DataBlockScanner scanner;
+   private FsDatasetImpl dataset;
+ 
++  private final static String BLOCKPOOL = "BP-TEST";
++
+   private static Storage.StorageDirectory createStorageDirectory(File root) {
+     Storage.StorageDirectory sd = new Storage.StorageDirectory(root);
+     dsForStorageUuid.createStorageID(sd);
+@@ -197,4 +206,38 @@ public void run() {}
+     verify(scanner, times(BLOCK_POOL_IDS.length))
+         .deleteBlocks(anyString(), any(Block[].class));
+   }
++
++  @Test
++  public void testDeletingBlocks() throws IOException {
++    MiniDFSCluster cluster = new MiniDFSCluster.Builder(new HdfsConfiguration()).build();
++    try {
++      cluster.waitActive();
++      DataNode dn = cluster.getDataNodes().get(0);
++
++      FsDatasetImpl ds = (FsDatasetImpl)DataNodeTestUtils.getFSDataset(dn);
++
++      ExtendedBlock eb = new ExtendedBlock(BLOCKPOOL, 1, 1, 1001);
++      FsVolumeImpl vol = ds.volumes.getNextVolume(StorageType.DEFAULT, 0);
++
++      ReplicaInfo info = new FinalizedReplica(
++          eb.getLocalBlock(), vol, vol.getCurrentDir().getParentFile());
++
++      ds.volumeMap.add(BLOCKPOOL, info);
++      info.getBlockFile().createNewFile();
++      info.getMetaFile().createNewFile();
++
++      Block[] blocks = new Block[]{info};
++      ds.invalidate(BLOCKPOOL, blocks);
++
++      assertEquals(ds.getNumDeletingBlocks(BLOCKPOOL), blocks.length);
++      assertTrue(ds.isDeletingBlock(BLOCKPOOL, info.getBlockId()));
++
++      Set<Long> blockIds = new HashSet<Long>();
++      blockIds.add(info.getBlockId());
++      ds.removeDeletedBlocks(BLOCKPOOL, blockIds);
++      assertEquals(ds.getNumDeletingBlocks(BLOCKPOOL), 0);
++    } finally {
++      cluster.shutdown();
++    }
++  }
+ }
