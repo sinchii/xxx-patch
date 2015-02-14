@@ -1,0 +1,37 @@
+package com.example;
+
+import java.util.List;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.ql.io.orc.OrcFile;
+import org.apache.hadoop.hive.ql.io.orc.Reader;
+import org.apache.hadoop.hive.ql.io.orc.RecordReader;
+import org.apache.hadoop.hive.serde2.objectinspector.StructField;
+import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
+
+public class OrcFileReader {
+  
+  public static void main(String[] args) throws Exception {
+    
+    Configuration config = new Configuration();
+    Path path = new Path(args[0]);
+    Reader reader = OrcFile.createReader(path, 
+        OrcFile.readerOptions(config).filesystem(FileSystem.get(config)));
+    RecordReader rows = reader.rows();
+    
+    StructObjectInspector rip = (StructObjectInspector) reader.getObjectInspector();
+    List<? extends StructField> field = rip.getAllStructFieldRefs();
+    while (rows.hasNext()) {
+      Object r = rows.next(null);
+      System.out.println(
+          rip.getStructFieldData(r, field.get(0)) + "," +
+          rip.getStructFieldData(r, field.get(1)));
+    }
+    
+    if (rows != null) {
+      rows.close();
+    }
+  }
+}
