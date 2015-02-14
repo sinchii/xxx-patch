@@ -1,0 +1,45 @@
+package com.example;
+
+import org.apache.commons.lang.math.RandomUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.ql.io.orc.CompressionKind;
+import org.apache.hadoop.hive.ql.io.orc.OrcFile;
+import org.apache.hadoop.hive.ql.io.orc.Writer;
+import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory;
+
+public class OrcFileWriter {
+
+  public static void main(String[] args) throws Exception {
+    
+    
+    ObjectInspector oip =
+        ObjectInspectorFactory.
+          getReflectionObjectInspector(Row.class, 
+              ObjectInspectorFactory.ObjectInspectorOptions.JAVA);
+    
+    Configuration config = new Configuration();
+    Path path = new Path(args[0]);
+    Writer writer = OrcFile.createWriter(path, 
+        OrcFile.writerOptions(config).inspector(oip).compress(CompressionKind.SNAPPY));
+    
+    for (int i = 0; i < 100000; i++) {
+      writer.addRow(new Row(i, RandomUtils.nextInt(10000)));
+    }
+    
+    if (writer != null) {
+      writer.close();
+    }
+  }
+
+  public static class Row {
+    int id;
+    int score;
+    
+    Row(int i, int s) {
+      id = i;
+      score = s;
+    }
+  }
+}
